@@ -2,7 +2,7 @@
 #SBATCH --job-name=me759_stencil
 #SBATCH --output=stencil_out_%j.txt
 #SBATCH --error=stencil_err_%j.txt
-#SBATCH --partition=gpu
+#SBATCH --partition=research
 #SBATCH --gres=gpu:1
 #SBATCH --time=00:20:00
 #SBATCH --ntasks=1
