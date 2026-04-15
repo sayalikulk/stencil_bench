@@ -196,7 +196,7 @@ CUDA_EOF
 # ══════════════════════════════════════════════════════════════
 # COMPILE
 # ══════════════════════════════════════════════════════════════
-module load cuda
+module load nvidia/cuda/12.2.0
 
 echo "=== GPU Info ==="
 nvidia-smi --query-gpu=name,memory.total,clocks.mem --format=csv
