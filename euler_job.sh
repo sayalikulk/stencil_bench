@@ -196,26 +196,38 @@ CUDA_EOF
 # ══════════════════════════════════════════════════════════════
 # COMPILE
 # ══════════════════════════════════════════════════════════════
-module load nvidia/cuda/12.2.0
+# Clean module state first
+module purge
+module load nvidia/cuda/12.9.1
+module load gcc/12.3.0   # or whatever gcc/12.x module Euler has
 
-echo "=== GPU Info ==="
-nvidia-smi --query-gpu=name,memory.total,clocks.mem --format=csv
+echo "=== Toolchain ==="
+which nvcc
+nvcc --version
+which gcc
+gcc --version
 echo ""
 
 # Auto-detect arch
 ARCH=$(python3 -c "
 import subprocess
-out = subprocess.check_output(['nvidia-smi','--query-gpu=name','--format=csv,noheader']).decode().lower()
+out = subprocess.check_output(
+    ['nvidia-smi','--query-gpu=name','--format=csv,noheader']
+).decode().lower()
 if 'h100' in out:   print('sm_90')
 elif 'a100' in out: print('sm_80')
 elif 'v100' in out: print('sm_70')
 elif 'p100' in out: print('sm_60')
 else:               print('sm_80')
 ")
+
 echo "Arch: $ARCH"
-nvcc -O3 -arch=$ARCH stencil.cu -o stencil
+
+nvcc -O3 -arch=$ARCH \
+  -ccbin=g++ \
+  stencil.cu -o stencil
+
 echo "Compiled OK"
-echo ""
 
 # ══════════════════════════════════════════════════════════════
 # RUN BENCHMARK
