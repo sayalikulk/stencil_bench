@@ -13,7 +13,6 @@ cd "$SLURM_SUBMIT_DIR"
 
 N=1048576
 
-# Clean environment first
 module purge
 module load nvidia/cuda/12.9.1
 
@@ -29,7 +28,6 @@ echo "=== GPU Info ==="
 nvidia-smi --query-gpu=name,memory.total,clocks.mem --format=csv
 echo ""
 
-# Auto-detect GPU arch
 ARCH=$(python3 - <<'PYEOF'
 import subprocess
 out = subprocess.check_output(
@@ -52,7 +50,6 @@ PYEOF
 echo "Detected arch: $ARCH"
 echo ""
 
-# Write stencil.cu
 cat > stencil.cu <<'CUDA_EOF'
 #include <cuda_runtime.h>
 #include <stdio.h>
@@ -60,6 +57,15 @@ cat > stencil.cu <<'CUDA_EOF'
 
 #define WARMUP_ITERS 5
 #define BENCH_ITERS 50
+
+#define CHECK(call) do { \
+    cudaError_t err__ = (call); \
+    if (err__ != cudaSuccess) { \
+        fprintf(stderr, "CUDA error %s:%d: %s\n", \
+                __FILE__, __LINE__, cudaGetErrorString(err__)); \
+        exit(1); \
+    } \
+} while(0)
 
 __global__ void stencil_naive(const float* __restrict__ in,
                               float* __restrict__ out,
@@ -69,8 +75,9 @@ __global__ void stencil_naive(const float* __restrict__ in,
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= R && i < N - R) {
         float acc = 0.f;
-        for (int r = -R; r <= R; r++)
+        for (int r = -R; r <= R; r++) {
             acc += w[r + R] * in[i + r];
+        }
         out[i] = acc;
     }
 }
@@ -81,10 +88,13 @@ __global__ void stencil_tiled(const float* __restrict__ in,
                               int N, int R)
 {
     extern __shared__ float tile[];
+
     int gid = blockIdx.x * blockDim.x + threadIdx.x;
     int lid = threadIdx.x + R;
 
-    if (gid < N) tile[lid] = in[gid];
+    if (gid < N) {
+        tile[lid] = in[gid];
+    }
 
     if (threadIdx.x < R) {
         int g = gid - R;
@@ -100,20 +110,12 @@ __global__ void stencil_tiled(const float* __restrict__ in,
 
     if (gid >= R && gid < N - R) {
         float acc = 0.f;
-        for (int r = -R; r <= R; r++)
+        for (int r = -R; r <= R; r++) {
             acc += w[r + R] * tile[lid + r];
+        }
         out[gid] = acc;
     }
 }
-
-#define CHECK(call) do { \
-    cudaError_t e = (call); \
-    if (e != cudaSuccess) { \
-        fprintf(stderr, "CUDA error %s:%d: %s\n", \
-                __FILE__, __LINE__, cudaGetErrorString(e)); \
-        exit(1); \
-    } \
-} while(0)
 
 int main(int argc, char** argv)
 {
@@ -121,6 +123,7 @@ int main(int argc, char** argv)
 
     cudaDeviceProp prop;
     CHECK(cudaGetDeviceProperties(&prop, 0));
+
     double peak_bw = 2.0 * prop.memoryClockRate * 1e3 * (prop.memoryBusWidth / 8);
 
     printf("GPU: %s\n", prop.name);
@@ -128,7 +131,9 @@ int main(int argc, char** argv)
     printf("N: %d\n\n", N);
 
     float *h_in = (float*)malloc(N * sizeof(float));
-    for (int i = 0; i < N; i++) h_in[i] = (float)rand() / RAND_MAX;
+    for (int i = 0; i < N; i++) {
+        h_in[i] = (float)rand() / RAND_MAX;
+    }
 
     float *d_in, *d_out;
     CHECK(cudaMalloc(&d_in, N * sizeof(float)));
@@ -151,41 +156,47 @@ int main(int argc, char** argv)
 
         float *h_w = (float*)malloc((2 * R + 1) * sizeof(float));
         float *d_w;
-        for (int i = 0; i < 2 * R + 1; i++) h_w[i] = 1.f / (2 * R + 1);
+        for (int i = 0; i < 2 * R + 1; i++) {
+            h_w[i] = 1.f / (2 * R + 1);
+        }
 
         CHECK(cudaMalloc(&d_w, (2 * R + 1) * sizeof(float)));
         CHECK(cudaMemcpy(d_w, h_w, (2 * R + 1) * sizeof(float), cudaMemcpyHostToDevice));
 
-        cudaEvent_t s, e;
-        CHECK(cudaEventCreate(&s));
-        CHECK(cudaEventCreate(&e));
+        cudaEvent_t start_evt, stop_evt;
+        CHECK(cudaEventCreate(&start_evt));
+        CHECK(cudaEventCreate(&stop_evt));
 
-        for (int i = 0; i < WARMUP_ITERS; i++)
+        for (int i = 0; i < WARMUP_ITERS; i++) {
             stencil_naive<<<nBlocks, bs>>>(d_in, d_out, d_w, N, R);
+        }
         CHECK(cudaDeviceSynchronize());
 
-        CHECK(cudaEventRecord(s));
-        for (int i = 0; i < BENCH_ITERS; i++)
+        CHECK(cudaEventRecord(start_evt));
+        for (int i = 0; i < BENCH_ITERS; i++) {
             stencil_naive<<<nBlocks, bs>>>(d_in, d_out, d_w, N, R);
-        CHECK(cudaEventRecord(e));
-        CHECK(cudaEventSynchronize(e));
+        }
+        CHECK(cudaEventRecord(stop_evt));
+        CHECK(cudaEventSynchronize(stop_evt));
 
         float t_n;
-        CHECK(cudaEventElapsedTime(&t_n, s, e));
+        CHECK(cudaEventElapsedTime(&t_n, start_evt, stop_evt));
         t_n /= BENCH_ITERS;
 
-        for (int i = 0; i < WARMUP_ITERS; i++)
+        for (int i = 0; i < WARMUP_ITERS; i++) {
             stencil_tiled<<<nBlocks, bs, shmem>>>(d_in, d_out, d_w, N, R);
+        }
         CHECK(cudaDeviceSynchronize());
 
-        CHECK(cudaEventRecord(s));
-        for (int i = 0; i < BENCH_ITERS; i++)
+        CHECK(cudaEventRecord(start_evt));
+        for (int i = 0; i < BENCH_ITERS; i++) {
             stencil_tiled<<<nBlocks, bs, shmem>>>(d_in, d_out, d_w, N, R);
-        CHECK(cudaEventRecord(e));
-        CHECK(cudaEventSynchronize(e));
+        }
+        CHECK(cudaEventRecord(stop_evt));
+        CHECK(cudaEventSynchronize(stop_evt));
 
         float t_t;
-        CHECK(cudaEventElapsedTime(&t_t, s, e));
+        CHECK(cudaEventElapsedTime(&t_t, start_evt, stop_evt));
         t_t /= BENCH_ITERS;
 
         double bn = (double)N * ((2 * R + 1) + 1) * 4 / (t_n * 1e-3) / 1e9;
@@ -194,9 +205,9 @@ int main(int argc, char** argv)
         printf("%-6d %-12.4f %-12.4f %-10.2f %-14.1f %-14.1f\n",
                R, t_n, t_t, t_n / t_t, bn, bt);
 
-        CHECK(cudaEventDestroy(s));
-        CHECK(cudaEventDestroy(e));
-        cudaFree(d_w);
+        CHECK(cudaEventDestroy(start_evt));
+        CHECK(cudaEventDestroy(stop_evt));
+        CHECK(cudaFree(d_w));
         free(h_w);
     }
 
@@ -207,7 +218,10 @@ int main(int argc, char** argv)
     int R = 8;
     float *h_w8 = (float*)malloc((2 * R + 1) * sizeof(float));
     float *d_w8;
-    for (int i = 0; i < 2 * R + 1; i++) h_w8[i] = 1.f / (2 * R + 1);
+
+    for (int i = 0; i < 2 * R + 1; i++) {
+        h_w8[i] = 1.f / (2 * R + 1);
+    }
 
     CHECK(cudaMalloc(&d_w8, (2 * R + 1) * sizeof(float)));
     CHECK(cudaMemcpy(d_w8, h_w8, (2 * R + 1) * sizeof(float), cudaMemcpyHostToDevice));
@@ -217,47 +231,52 @@ int main(int argc, char** argv)
         int nBlocks = (N + bs - 1) / bs;
         size_t shmem = (bs + 2 * R) * sizeof(float);
 
-        cudaEvent_t s, e;
-        CHECK(cudaEventCreate(&s));
-        CHECK(cudaEventCreate(&e));
+        cudaEvent_t start_evt, stop_evt;
+        CHECK(cudaEventCreate(&start_evt));
+        CHECK(cudaEventCreate(&stop_evt));
 
-        for (int i = 0; i < WARMUP_ITERS; i++)
+        for (int i = 0; i < WARMUP_ITERS; i++) {
             stencil_naive<<<nBlocks, bs>>>(d_in, d_out, d_w8, N, R);
+        }
         CHECK(cudaDeviceSynchronize());
 
-        CHECK(cudaEventRecord(s));
-        for (int i = 0; i < BENCH_ITERS; i++)
+        CHECK(cudaEventRecord(start_evt));
+        for (int i = 0; i < BENCH_ITERS; i++) {
             stencil_naive<<<nBlocks, bs>>>(d_in, d_out, d_w8, N, R);
-        CHECK(cudaEventRecord(e));
-        CHECK(cudaEventSynchronize(e));
+        }
+        CHECK(cudaEventRecord(stop_evt));
+        CHECK(cudaEventSynchronize(stop_evt));
 
         float t_n;
-        CHECK(cudaEventElapsedTime(&t_n, s, e));
+        CHECK(cudaEventElapsedTime(&t_n, start_evt, stop_evt));
         t_n /= BENCH_ITERS;
 
-        for (int i = 0; i < WARMUP_ITERS; i++)
+        for (int i = 0; i < WARMUP_ITERS; i++) {
             stencil_tiled<<<nBlocks, bs, shmem>>>(d_in, d_out, d_w8, N, R);
+        }
         CHECK(cudaDeviceSynchronize());
 
-        CHECK(cudaEventRecord(s));
-        for (int i = 0; i < BENCH_ITERS; i++)
+        CHECK(cudaEventRecord(start_evt));
+        for (int i = 0; i < BENCH_ITERS; i++) {
             stencil_tiled<<<nBlocks, bs, shmem>>>(d_in, d_out, d_w8, N, R);
-        CHECK(cudaEventRecord(e));
-        CHECK(cudaEventSynchronize(e));
+        }
+        CHECK(cudaEventRecord(stop_evt));
+        CHECK(cudaEventSynchronize(stop_evt));
 
         float t_t;
-        CHECK(cudaEventElapsedTime(&t_t, s, e));
+        CHECK(cudaEventElapsedTime(&t_t, start_evt, stop_evt));
         t_t /= BENCH_ITERS;
 
         printf("%-10d %-12.4f %-12.4f %-10.2f\n", bs, t_n, t_t, t_n / t_t);
 
-        CHECK(cudaEventDestroy(s));
-        CHECK(cudaEventDestroy(e));
+        CHECK(cudaEventDestroy(start_evt));
+        CHECK(cudaEventDestroy(stop_evt));
     }
 
-    cudaFree(d_w8);
-    cudaFree(d_in);
-    cudaFree(d_out);
+    CHECK(cudaFree(d_w8));
+    CHECK(cudaFree(d_in));
+    CHECK(cudaFree(d_out));
+
     free(h_w8);
     free(h_in);
 
@@ -273,7 +292,6 @@ echo ""
 echo "=== Running benchmark ==="
 ./stencil $N
 
-# Generate roofline plot
 if [ ! -d ".venv" ]; then
     python3 -m venv .venv
 fi
